@@ -14,7 +14,11 @@
 
 package raft
 
-import "fmt"
+import (
+	"fmt"
+
+	pb "github.com/coreos/etcd/raft/raftpb"
+)
 
 const (
 	ProgressStateProbe ProgressStateType = iota
@@ -48,6 +52,8 @@ type Progress struct {
 	// When in ProgressStateSnapshot, leader should have sent out snapshot
 	// before and stops sending any replication message.
 	State ProgressStateType
+
+	Suffrage pb.SuffrageState
 	// Paused is used in ProgressStateProbe.
 	// When Paused is true, raft should pause sending replication message to this peer.
 	Paused bool
@@ -181,7 +187,8 @@ func (pr *Progress) needSnapshotAbort() bool {
 }
 
 func (pr *Progress) String() string {
-	return fmt.Sprintf("next = %d, match = %d, state = %s, waiting = %v, pendingSnapshot = %d", pr.Next, pr.Match, pr.State, pr.IsPaused(), pr.PendingSnapshot)
+	return fmt.Sprintf("next = %d, match = %d, state = %s, suffrage = %s, waiting = %v, pendingSnapshot = %d",
+		pr.Next, pr.Match, pr.State, pr.Suffrage, pr.IsPaused(), pr.PendingSnapshot)
 }
 
 type inflights struct {
