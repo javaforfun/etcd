@@ -1420,6 +1420,8 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 	*confState = *s.r.ApplyConfChange(cc)
 	switch cc.Type {
 	case raftpb.ConfChangeAddNode:
+	case raftpb.ConfChangeAddNonvoter:
+	case raftpb.ConfChangeAddVoter:
 		m := new(membership.Member)
 		if err := json.Unmarshal(cc.Context, m); err != nil {
 			plog.Panicf("unmarshal member should never fail: %v", err)
@@ -1427,6 +1429,7 @@ func (s *EtcdServer) applyConfChange(cc raftpb.ConfChange, confState *raftpb.Con
 		if cc.NodeID != uint64(m.ID) {
 			plog.Panicf("nodeID should always be equal to member ID")
 		}
+		// TODO(lishuai): change for AddVoter, AddNonvoter
 		s.cluster.AddMember(m)
 		if m.ID != s.id {
 			s.r.transport.AddPeer(m.ID, m.PeerURLs)

@@ -43,6 +43,7 @@ type Attributes struct {
 	ClientURLs []string `json:"clientURLs,omitempty"`
 }
 
+// TODO(lishuai): change for AddVoter, AddNonvoter
 type Member struct {
 	ID types.ID `json:"id"`
 	RaftAttributes

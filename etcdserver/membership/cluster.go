@@ -223,6 +223,7 @@ func (c *RaftCluster) Recover(onSet func(*semver.Version)) {
 // ValidateConfigurationChange takes a proposed ConfChange and
 // ensures that it is still valid.
 func (c *RaftCluster) ValidateConfigurationChange(cc raftpb.ConfChange) error {
+	// TODO(lishuai): change for AddVoter, AddNonvoter
 	members, removed := membersFromStore(c.store)
 	id := types.ID(cc.NodeID)
 	if removed[id] {
