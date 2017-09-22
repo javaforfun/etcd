@@ -1075,6 +1075,18 @@ func (s *EtcdServer) checkMembershipOperationPermission(ctx context.Context) err
 }
 
 func (s *EtcdServer) AddMember(ctx context.Context, memb membership.Member) ([]*membership.Member, error) {
+	return s.AddMemberWithType(ctx, memb, raftpb.ConfChangeAddNode)
+}
+
+func (s *EtcdServer) AddNonvoterMember(ctx context.Context, memb membership.Member) ([]*membership.Member, error) {
+	return s.AddMemberWithType(ctx, memb, raftpb.ConfChangeAddNonvoter)
+}
+
+func (s *EtcdServer) AddVoterMember(ctx context.Context, memb membership.Member) ([]*membership.Member, error) {
+	return s.AddMemberWithType(ctx, memb, raftpb.ConfChangeAddVoter)
+}
+
+func (s *EtcdServer) AddMemberWithType(ctx context.Context, memb membership.Member, changetype raftpb.ConfChangeType) ([]*membership.Member, error) {
 	if err := s.checkMembershipOperationPermission(ctx); err != nil {
 		return nil, err
 	}
@@ -1096,8 +1108,9 @@ func (s *EtcdServer) AddMember(ctx context.Context, memb membership.Member) ([]*
 	if err != nil {
 		return nil, err
 	}
+
 	cc := raftpb.ConfChange{
-		Type:    raftpb.ConfChangeAddNode,
+		Type:    changetype,
 		NodeID:  uint64(memb.ID),
 		Context: b,
 	}
