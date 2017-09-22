@@ -103,7 +103,7 @@ func NewRawNode(config *Config, peers []Peer) (*RawNode, error) {
 		r.raftLog.append(ents...)
 		r.raftLog.committed = uint64(len(ents))
 		for _, peer := range peers {
-			r.addNode(peer.ID)
+			r.addNode(peer.ID, pb.Voter)
 		}
 	}
 
@@ -174,11 +174,15 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 	}
 	switch cc.Type {
 	case pb.ConfChangeAddNode:
-		rn.raft.addNode(cc.NodeID)
+		rn.raft.addNode(cc.NodeID, pb.Voter)
 	case pb.ConfChangeRemoveNode:
 		rn.raft.removeNode(cc.NodeID)
 	case pb.ConfChangeUpdateNode:
 		rn.raft.resetPendingConf()
+	case pb.ConfChangeAddNonvoter:
+		rn.raft.addNode(cc.NodeID, pb.Nonvoter)
+	case pb.ConfChangeAddVoter:
+		rn.raft.addNode(cc.NodeID, pb.Staging)
 	default:
 		panic("unexpected conf type")
 	}

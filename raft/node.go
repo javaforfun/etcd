@@ -202,8 +202,7 @@ func StartNode(c *Config, peers []Peer) Node {
 	// We do not set raftLog.applied so the application will be able
 	// to observe all conf changes via Ready.CommittedEntries.
 	for _, peer := range peers {
-		// TODO(lishuai): use peers.Server which have SuffrageState
-		r.addNode(peer.ID)
+		r.addNode(peer.ID, pb.Voter)
 	}
 
 	n := newNode()
@@ -334,7 +333,11 @@ func (n *node) run(r *raft) {
 			}
 			switch cc.Type {
 			case pb.ConfChangeAddNode:
-				r.addNode(cc.NodeID)
+				r.addNode(cc.NodeID, pb.Voter)
+			case pb.ConfChangeAddVoter:
+				r.addNode(cc.NodeID, pb.Staging)
+			case pb.ConfChangeAddNonvoter:
+				r.addNode(cc.NodeID, pb.Nonvoter)
 			case pb.ConfChangeRemoveNode:
 				// block incoming proposal when local node is
 				// removed

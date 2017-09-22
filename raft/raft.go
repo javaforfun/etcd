@@ -114,7 +114,7 @@ type Config struct {
 	// should only be set when starting a new raft cluster. Restarting raft from
 	// previous configuration will panic if peers is set. peer is private and only
 	// used for testing right now.
-	peers []uint64
+	peers []pb.Server
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
 	// elections. That is, if a follower does not receive any message from the
@@ -292,6 +292,9 @@ func newRaft(c *Config) *raft {
 		panic(err) // TODO(bdarnell)
 	}
 	peers := c.peers
+	if len(cs.Nodes) > 0 && len(cs.Servers) > 0 {
+		panic("cannot specify both ConfState.Nodes and ConfState.Servers")
+	}
 	if len(cs.Nodes) > 0 {
 		if len(peers) > 0 {
 			// TODO(bdarnell): the peers argument is always nil except in
@@ -299,7 +302,17 @@ func newRaft(c *Config) *raft {
 			// updated to specify their nodes through a snapshot.
 			panic("cannot specify both newRaft(peers) and ConfState.Nodes)")
 		}
-		peers = cs.Nodes
+		for _, n := range cs.Nodes {
+			peers = append(peers, pb.Server{Node: n, Suffrage: pb.Voter})
+		}
+	}
+	if len(cs.Servers) > 0 {
+		if len(peers) > 0 {
+			panic("cannot specify both newRaft(peers) and ConfState.Servers)")
+		}
+		for _, s := range cs.Servers {
+			peers = append(peers, *s)
+		}
 	}
 	r := &raft{
 		id:                        c.ID,
@@ -316,10 +329,18 @@ func newRaft(c *Config) *raft {
 		readOnly:                  newReadOnly(c.ReadOnlyOption),
 		disableProposalForwarding: c.DisableProposalForwarding,
 	}
+	current_suffrage := false
 	for _, p := range peers {
-		// TODO(lishuai): use peers.server which have node and suffrage
-		r.prs[p] = &Progress{Next: 1, ins: newInflights(r.maxInflight)}
+		r.prs[p.Node] = &Progress{Next: 1, ins: newInflights(r.maxInflight), Suffrage: p.Suffrage}
+		if r.id == p.Node {
+			r.suffrage = p.Suffrage
+			current_suffrage = true
+		}
 	}
+	if !current_suffrage {
+		panic("donot have current node in ConfState")
+	}
+
 	if !isHardStateEqual(hs, emptyState) {
 		r.loadState(hs)
 	}
@@ -684,7 +705,7 @@ func (r *raft) campaign(t CampaignType) {
 		if id == r.id {
 			continue
 		}
-		if r.prs[id].suffrage != pb.Voter {
+		if r.prs[id].Suffrage != pb.Voter {
 			continue
 		}
 		r.logger.Infof("%x [logterm: %d, index: %d] sent %s request to %x at term %d",
@@ -798,7 +819,7 @@ func (r *raft) Step(m pb.Message) error {
 		}
 
 	case pb.MsgVote, pb.MsgPreVote:
-		r.suffrage == pb.Nonvoter {
+		if r.suffrage == pb.Nonvoter {
 			r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] ignored %s from %x [logterm: %d, index: %d] at term %d: suffrage: nonvoter",
 				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.Type, m.From, m.LogTerm, m.Index, r.Term)
 			return nil
@@ -1188,7 +1209,9 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	r.raftLog.restore(s)
 	r.prs = make(map[uint64]*Progress)
 	r.voterCount = 0
-	// TODO(lishuai): add ConfState.version ?
+	if len(s.Metadata.ConfState.Nodes) > 0 && len(s.Metadata.ConfState.Servers) > 0 {
+		panic("cannot specify both ConfState.Nodes and ConfState.Servers")
+	}
 	for _, n := range s.Metadata.ConfState.Nodes {
 		match, next := uint64(0), r.raftLog.lastIndex()+1
 		if n == r.id {
@@ -1200,14 +1223,14 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	}
 	for _, server := range s.Metadata.ConfState.Servers {
 		match, next := uint64(0), r.raftLog.lastIndex()+1
-		if server.node == r.id {
+		if server.Node == r.id {
 			match = next - 1
 		}
-		r.setProgress(n, match, next, server.suffrage)
-		if server.suffrage == pb.Voter {
+		r.setProgress(server.Node, match, next, server.Suffrage)
+		if server.Suffrage == pb.Voter {
 			r.voterCount++
 		}
-		r.logger.Infof("%x restored progress of %x [%s]", r.id, n, r.prs[n])
+		r.logger.Infof("%x restored progress of %x [%s]", r.id, server.Node, r.prs[server.Node])
 	}
 	return true
 }
@@ -1222,13 +1245,13 @@ func (r *raft) promotable() bool {
 func (r *raft) addNode(id uint64, suffrage pb.SuffrageState) {
 	r.pendingConf = false
 	if _, ok := r.prs[id] ; !ok {
-		if r.prs[id].suffrage == suffrage {
+		if r.prs[id].Suffrage == suffrage {
 			// Ignore any redundant addNode calls (which can happen because the
 			// initial bootstrapping entries are applied twice).
 			return
 		}
-		// TODO(lishuai): check state, Nonvoter -> Staging -> Voter
-		r.prs[id].suffrage = suffrage
+		// TODO(lishuai): check state change, Nonvoter -> Staging -> Voter
+		r.prs[id].Suffrage = suffrage
 		if suffrage == pb.Voter {
 			r.voterCount++
 		}
@@ -1245,7 +1268,7 @@ func (r *raft) addNode(id uint64, suffrage pb.SuffrageState) {
 
 func (r *raft) removeNode(id uint64) {
 	if _, ok := r.prs[id] ; ok {
-		if r.prs[id].suffrage == pb.Voter {
+		if r.prs[id].Suffrage == pb.Voter {
 			r.voterCount--
 		}
 	}
@@ -1270,8 +1293,8 @@ func (r *raft) removeNode(id uint64) {
 
 func (r *raft) resetPendingConf() { r.pendingConf = false }
 
-func (r *raft) setProgress(id, match, next uint64, suffrage pb.Suffrage) {
-	r.prs[id] = &Progress{Next: next, Match: match, ins: newInflights(r.maxInflight), suffrage: suffrage}
+func (r *raft) setProgress(id, match, next uint64, suffrage pb.SuffrageState) {
+	r.prs[id] = &Progress{Next: next, Match: match, ins: newInflights(r.maxInflight), Suffrage: suffrage}
 }
 
 func (r *raft) delProgress(id uint64) {
