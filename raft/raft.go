@@ -114,7 +114,7 @@ type Config struct {
 	// should only be set when starting a new raft cluster. Restarting raft from
 	// previous configuration will panic if peers is set. peer is private and only
 	// used for testing right now.
-	peers []uint64
+	peers []pb.Server
 
 	// ElectionTick is the number of Node.Tick invocations that must pass between
 	// elections. That is, if a follower does not receive any message from the
@@ -238,6 +238,8 @@ type raft struct {
 
 	state StateType
 
+	suffrage pb.SuffrageState
+
 	votes map[uint64]bool
 
 	msgs []pb.Message
@@ -289,6 +291,9 @@ func newRaft(c *Config) *raft {
 		panic(err) // TODO(bdarnell)
 	}
 	peers := c.peers
+	if len(cs.Nodes) > 0 && len(cs.Servers) > 0 {
+		panic("cannot specify both ConfState.Nodes and ConfState.Servers")
+	}
 	if len(cs.Nodes) > 0 {
 		if len(peers) > 0 {
 			// TODO(bdarnell): the peers argument is always nil except in
@@ -296,11 +301,22 @@ func newRaft(c *Config) *raft {
 			// updated to specify their nodes through a snapshot.
 			panic("cannot specify both newRaft(peers) and ConfState.Nodes)")
 		}
-		peers = cs.Nodes
+		for _, n := range cs.Nodes {
+			peers = append(peers, pb.Server{Node: n, Suffrage: pb.Voter})
+		}
+	}
+	if len(cs.Servers) > 0 {
+		if len(peers) > 0 {
+			panic("cannot specify both newRaft(peers) and ConfState.Servers)")
+		}
+		for _, s := range cs.Servers {
+			peers = append(peers, *s)
+		}
 	}
 	r := &raft{
 		id:                        c.ID,
 		lead:                      None,
+		suffrage:                  pb.Voter,
 		raftLog:                   raftlog,
 		maxMsgSize:                c.MaxSizePerMsg,
 		maxInflight:               c.MaxInflightMsgs,
@@ -314,7 +330,10 @@ func newRaft(c *Config) *raft {
 		disableProposalForwarding: c.DisableProposalForwarding,
 	}
 	for _, p := range peers {
-		r.prs[p] = &Progress{Next: 1, ins: newInflights(r.maxInflight)}
+		r.prs[p.Node] = &Progress{Next: 1, ins: newInflights(r.maxInflight), Suffrage: p.Suffrage}
+		if r.id == p.Node {
+			r.suffrage = p.Suffrage
+		}
 	}
 	if !isHardStateEqual(hs, emptyState) {
 		r.loadState(hs)
@@ -324,14 +343,18 @@ func newRaft(c *Config) *raft {
 	}
 	r.becomeFollower(r.Term, None)
 
-	var nodesStrs []string
-	for _, n := range r.nodes() {
-		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
-	}
-
+	nodesStrs := r.nodeSuffrage()
 	r.logger.Infof("newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
 		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, r.raftLog.lastIndex(), r.raftLog.lastTerm())
 	return r
+}
+
+func (r *raft) nodeSuffrage() []string {
+	nodes := make([]string, 0, len(r.prs))
+	for id := range r.prs {
+		nodes = append(nodes, fmt.Sprintf("%d-%s", id, r.prs[id].Suffrage))
+	}
+	return nodes
 }
 
 func (r *raft) hasLeader() bool { return r.lead != None }
@@ -346,7 +369,17 @@ func (r *raft) hardState() pb.HardState {
 	}
 }
 
-func (r *raft) quorum() int { return len(r.prs)/2 + 1 }
+func (r *raft) voterCount() int {
+	count := 0
+	for _, p := range r.prs {
+		if p.Suffrage == pb.Voter {
+			count++
+		}
+	}
+	return count
+}
+
+func (r *raft) quorum() int { return r.voterCount()/2 + 1 }
 
 func (r *raft) nodes() []uint64 {
 	nodes := make([]uint64, 0, len(r.prs))
@@ -504,9 +537,14 @@ func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
 // r.bcastAppend).
 func (r *raft) maybeCommit() bool {
 	// TODO(bmizerany): optimize.. Currently naive
-	mis := make(uint64Slice, 0, len(r.prs))
-	for id := range r.prs {
-		mis = append(mis, r.prs[id].Match)
+	mis := make(uint64Slice, 0, r.voterCount())
+	if r.voterCount() == 0 {
+		panic("voter count 0")
+	}
+	for _, p := range r.prs {
+		if p.Suffrage == pb.Voter {
+			mis = append(mis, p.Match)
+		}
 	}
 	sort.Sort(sort.Reverse(mis))
 	mci := mis[r.quorum()-1]
@@ -528,10 +566,12 @@ func (r *raft) reset(term uint64) {
 
 	r.votes = make(map[uint64]bool)
 	for id := range r.prs {
-		r.prs[id] = &Progress{Next: r.raftLog.lastIndex() + 1, ins: newInflights(r.maxInflight)}
+		r.prs[id] = &Progress{Next: r.raftLog.lastIndex() + 1, ins: newInflights(r.maxInflight), Suffrage: r.prs[id].Suffrage}
 		if id == r.id {
 			r.prs[id].Match = r.raftLog.lastIndex()
 		}
+		nodesStrs := r.nodeSuffrage()
+		r.logger.Infof("reset %x [peers: [%s]", r.id, strings.Join(nodesStrs, ","))
 	}
 	r.pendingConf = false
 	r.readOnly = newReadOnly(r.readOnly.option)
@@ -555,7 +595,9 @@ func (r *raft) tickElection() {
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
-		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
+		if r.suffrage == pb.Voter {
+			r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
+		}
 	}
 }
 
@@ -674,6 +716,9 @@ func (r *raft) campaign(t CampaignType) {
 	}
 	for id := range r.prs {
 		if id == r.id {
+			continue
+		}
+		if r.prs[id].Suffrage != pb.Voter {
 			continue
 		}
 		r.logger.Infof("%x [logterm: %d, index: %d] sent %s request to %x at term %d",
@@ -1171,13 +1216,26 @@ func (r *raft) restore(s pb.Snapshot) bool {
 
 	r.raftLog.restore(s)
 	r.prs = make(map[uint64]*Progress)
+	if len(s.Metadata.ConfState.Nodes) > 0 && len(s.Metadata.ConfState.Servers) > 0 {
+		panic("cannot specify both ConfState.Nodes and ConfState.Servers")
+	}
 	for _, n := range s.Metadata.ConfState.Nodes {
 		match, next := uint64(0), r.raftLog.lastIndex()+1
 		if n == r.id {
 			match = next - 1
+			r.suffrage = pb.Voter
 		}
-		r.setProgress(n, match, next)
+		r.setProgress(n, match, next, pb.Voter)
 		r.logger.Infof("%x restored progress of %x [%s]", r.id, n, r.prs[n])
+	}
+	for _, server := range s.Metadata.ConfState.Servers {
+		match, next := uint64(0), r.raftLog.lastIndex()+1
+		if server.Node == r.id {
+			match = next - 1
+			r.suffrage = server.Suffrage
+		}
+		r.setProgress(server.Node, match, next, server.Suffrage)
+		r.logger.Infof("%x restored progress of %x [%s]", r.id, server.Node, r.prs[server.Node])
 	}
 	return true
 }
@@ -1190,14 +1248,34 @@ func (r *raft) promotable() bool {
 }
 
 func (r *raft) addNode(id uint64) {
+	r.addNodeWithSuffrage(id, pb.Voter)
+}
+
+func (r *raft) addNonvoter(id uint64) {
+	r.addNodeWithSuffrage(id, pb.Nonvoter)
+}
+
+func (r *raft) addVoter(id uint64) {
+	r.addNodeWithSuffrage(id, pb.Staging)
+}
+
+func (r *raft) addNodeWithSuffrage(id uint64, suffrage pb.SuffrageState) {
 	r.pendingConf = false
 	if _, ok := r.prs[id]; ok {
-		// Ignore any redundant addNode calls (which can happen because the
-		// initial bootstrapping entries are applied twice).
-		return
+		if r.prs[id].Suffrage == suffrage {
+			// Ignore any redundant addNode calls (which can happen because the
+			// initial bootstrapping entries are applied twice).
+			return
+		}
+		// TODO(lishuai): check state change, Nonvoter -> Staging -> Voter
+		r.prs[id].Suffrage = suffrage
+	} else {
+		r.setProgress(id, 0, r.raftLog.lastIndex()+1, suffrage)
 	}
 
-	r.setProgress(id, 0, r.raftLog.lastIndex()+1)
+	if r.id == id {
+		r.suffrage = suffrage
+	}
 	// When a node is first added, we should mark it as recently active.
 	// Otherwise, CheckQuorum may cause us to step down if it is invoked
 	// before the added node has a chance to communicate with us.
@@ -1226,8 +1304,8 @@ func (r *raft) removeNode(id uint64) {
 
 func (r *raft) resetPendingConf() { r.pendingConf = false }
 
-func (r *raft) setProgress(id, match, next uint64) {
-	r.prs[id] = &Progress{Next: next, Match: match, ins: newInflights(r.maxInflight)}
+func (r *raft) setProgress(id, match, next uint64, suffrage pb.SuffrageState) {
+	r.prs[id] = &Progress{Next: next, Match: match, ins: newInflights(r.maxInflight), Suffrage: suffrage}
 }
 
 func (r *raft) delProgress(id uint64) {
@@ -1267,7 +1345,7 @@ func (r *raft) checkQuorumActive() bool {
 			continue
 		}
 
-		if r.prs[id].RecentActive {
+		if r.prs[id].RecentActive && r.prs[id].Suffrage == pb.Voter {
 			act++
 		}
 

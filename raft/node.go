@@ -334,6 +334,10 @@ func (n *node) run(r *raft) {
 			switch cc.Type {
 			case pb.ConfChangeAddNode:
 				r.addNode(cc.NodeID)
+			case pb.ConfChangeAddNonvoter:
+				r.addNonvoter(cc.NodeID)
+			case pb.ConfChangeAddVoter:
+				r.addVoter(cc.NodeID)
 			case pb.ConfChangeRemoveNode:
 				// block incoming proposal when local node is
 				// removed
