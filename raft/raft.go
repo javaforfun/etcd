@@ -605,6 +605,24 @@ func (r *raft) tickHeartbeat() {
 		if r.state == StateLeader && r.leadTransferee != None {
 			r.abortLeaderTransfer()
 		}
+
+		// TODO(shuaili): since we don't know pb.ConfChange.Context in raft,
+		// we may need move this MsgProp ConfChange to etcdserver/raft, but in that case,
+		// maybe let user call AddNode will do the same thing, we may don't need Staging state.
+		if r.state == StateLeader && !r.pendingConf {
+			if id, ok := r.getCatchingupNode(); ok {
+				r.logger.Infof("get_catching_up_node %x", id)
+				cc := pb.ConfChange{
+					Type:   pb.ConfChangeAddNode,
+					NodeID: id,
+				}
+				data, err := cc.Marshal()
+				if err != nil {
+					return
+				}
+				r.Step(pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChange, Data: data}}})
+			}
+		}
 	}
 
 	if r.state != StateLeader {
@@ -1234,6 +1252,17 @@ func (r *raft) restore(s pb.Snapshot) bool {
 	return true
 }
 
+func (r *raft) getCatchingupNode() (uint64, bool) {
+	for i, p := range r.prs {
+		if p.Suffrage == pb.Staging {
+			if p.Match+uint64(r.maxInflight) >= r.raftLog.lastIndex() {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // promotable indicates whether state machine can be promoted to leader,
 // which is true when its own id is in progress list and suffrage is Voter
 func (r *raft) promotable() bool {
@@ -1256,14 +1285,10 @@ func (r *raft) addNode(id uint64) {
 func (r *raft) addNodeWithSuffrage(id uint64, suffrage pb.SuffrageState) {
 	r.pendingConf = false
 	if _, ok := r.prs[id]; ok {
-		if r.prs[id].Suffrage == suffrage {
+		if r.prs[id].Suffrage >= suffrage {
+			// addNode suffrage change order: Nonvoter -> Staging -> Voter
 			// Ignore any redundant addNode calls (which can happen because the
 			// initial bootstrapping entries are applied twice).
-			return
-		}
-		// TODO(lishuai): check state change, Nonvoter -> Staging -> Voter
-		if suffrage != pb.Voter {
-			// addNode can only change suffrage from Nonvoter to Voter
 			return
 		}
 		r.prs[id].Suffrage = suffrage

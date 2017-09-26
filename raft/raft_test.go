@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/coreos/etcd/pkg/pbutil"
 	pb "github.com/coreos/etcd/raft/raftpb"
 )
 
@@ -349,6 +350,54 @@ func testLeaderElection(t *testing.T, preVote bool) {
 }
 
 func TestNonvoterElectionTimeout(t *testing.T) {
+	n1 := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	n1.prs[3].Suffrage = pb.Nonvoter
+
+	n2 := newTestRaft(2, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	n2.prs[3].Suffrage = pb.Nonvoter
+
+	n3 := newTestRaft(3, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+	n3.suffrage = pb.Nonvoter
+	n3.prs[3].Suffrage = pb.Nonvoter
+
+	n1.becomeFollower(1, None)
+	n2.becomeFollower(1, None)
+	n3.becomeFollower(1, None)
+
+	nt := newNetwork(n1, n2, n3)
+
+	// Nonvoter can't start election
+	setRandomizedElectionTimeout(n3, n3.electionTimeout)
+	for i := 0; i < n3.electionTimeout; i++ {
+		n3.tick()
+	}
+	if n1.state != StateFollower {
+		t.Errorf("peer 1 state: %s, want %s", n1.state, StateFollower)
+	}
+	if n2.state != StateFollower {
+		t.Errorf("peer 2 state: %s, want %s", n2.state, StateFollower)
+	}
+	if n3.state != StateFollower {
+		t.Errorf("peer 3 state: %s, want %s", n3.state, StateFollower)
+	}
+
+	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+	if n1.state != StateLeader {
+		t.Errorf("peer 1 state: %s, want %s", n1.state, StateLeader)
+	}
+
+	// node 3 become Voter
+	n1.addNode(3)
+	n2.addNode(3)
+	n3.addNode(3)
+
+	nt.send(pb.Message{From: 3, To: 3, Type: pb.MsgHup})
+	if n3.state != StateLeader {
+		t.Errorf("peer 3 state: %s, want %s", n3.state, StateLeader)
+	}
+}
+
+func TestStagingElectionTimeout(t *testing.T) {
 	n1 := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	n1.prs[3].Suffrage = pb.Nonvoter
 
@@ -2667,6 +2716,42 @@ func TestAddNonvoter(t *testing.T) {
 	}
 	if r.prs[2].Suffrage != pb.Nonvoter {
 		t.Fatalf("node 2 has suffrage %s, want %s", r.prs[2].Suffrage, pb.Nonvoter)
+	}
+}
+
+func TestAddVoter(t *testing.T) {
+	r := newTestRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.pendingConf = true
+	r.addVoter(2)
+	if r.pendingConf {
+		t.Errorf("pendingConf = %v, want false", r.pendingConf)
+	}
+	nodes := r.nodes()
+	wnodes := []uint64{1, 2}
+	if !reflect.DeepEqual(nodes, wnodes) {
+		t.Errorf("nodes = %v, want %v", nodes, wnodes)
+	}
+	if r.prs[2].Suffrage != pb.Staging {
+		t.Fatalf("node 2 has suffrage %s, want %s", r.prs[2].Suffrage, pb.Staging)
+	}
+
+	setRandomizedElectionTimeout(r, r.electionTimeout)
+	for i := 0; i < r.electionTimeout; i++ {
+		r.tick()
+	}
+	ents, err := r.raftLog.entries(r.raftLog.lastIndex(), 1)
+	if err != nil {
+		t.Fatalf("get entry %x fail %s", r.raftLog.lastIndex(), err)
+	}
+	if ents[0].Type != pb.EntryConfChange {
+		t.Fatalf("entry %x has Type %s, want %s", r.raftLog.lastIndex(), ents[0].Type, pb.EntryConfChange)
+	}
+	var cc pb.ConfChange
+	pbutil.MustUnmarshal(&cc, ents[0].Data)
+	if cc.Type != pb.ConfChangeAddNode || cc.NodeID != 2 {
+		t.Fatalf("cc Type %s NodeID %x, want %s %x", cc.Type, cc.NodeID, pb.ConfChangeAddNode, 2)
 	}
 }
 
