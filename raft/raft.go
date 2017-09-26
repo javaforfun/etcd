@@ -343,18 +343,14 @@ func newRaft(c *Config) *raft {
 	}
 	r.becomeFollower(r.Term, None)
 
-	nodesStrs := r.nodeSuffrage()
+	var nodesStrs []string
+	for _, n := range r.nodes() {
+		nodesStrs = append(nodesStrs, fmt.Sprintf("%x", n))
+	}
+
 	r.logger.Infof("newRaft %x [peers: [%s], term: %d, commit: %d, applied: %d, lastindex: %d, lastterm: %d]",
 		r.id, strings.Join(nodesStrs, ","), r.Term, r.raftLog.committed, r.raftLog.applied, r.raftLog.lastIndex(), r.raftLog.lastTerm())
 	return r
-}
-
-func (r *raft) nodeSuffrage() []string {
-	nodes := make([]string, 0, len(r.prs))
-	for id := range r.prs {
-		nodes = append(nodes, fmt.Sprintf("%d-%s", id, r.prs[id].Suffrage))
-	}
-	return nodes
 }
 
 func (r *raft) hasLeader() bool { return r.lead != None }
@@ -369,6 +365,7 @@ func (r *raft) hardState() pb.HardState {
 	}
 }
 
+// TODO(shuaili): optimize, maybe record voterCount in raft
 func (r *raft) voterCount() int {
 	count := 0
 	for _, p := range r.prs {
@@ -538,9 +535,6 @@ func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
 func (r *raft) maybeCommit() bool {
 	// TODO(bmizerany): optimize.. Currently naive
 	mis := make(uint64Slice, 0, r.voterCount())
-	if r.voterCount() == 0 {
-		panic("voter count 0")
-	}
 	for _, p := range r.prs {
 		if p.Suffrage == pb.Voter {
 			mis = append(mis, p.Match)
@@ -570,8 +564,6 @@ func (r *raft) reset(term uint64) {
 		if id == r.id {
 			r.prs[id].Match = r.raftLog.lastIndex()
 		}
-		nodesStrs := r.nodeSuffrage()
-		r.logger.Infof("reset %x [peers: [%s]", r.id, strings.Join(nodesStrs, ","))
 	}
 	r.pendingConf = false
 	r.readOnly = newReadOnly(r.readOnly.option)
@@ -595,9 +587,7 @@ func (r *raft) tickElection() {
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
-		if r.suffrage == pb.Voter {
-			r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
-		}
+		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
 	}
 }
 
@@ -1035,6 +1025,10 @@ func stepLeader(r *raft, m pb.Message) {
 		}
 		r.logger.Debugf("%x failed to send message to %x because it is unreachable [%s]", r.id, m.From, pr)
 	case pb.MsgTransferLeader:
+		if pr.Suffrage != pb.Voter {
+			r.logger.Debugf("%x is not Voter. Ignored transferring leadership", r.id)
+			return
+		}
 		leadTransferee := m.From
 		lastLeadTransferee := r.leadTransferee
 		if lastLeadTransferee != None {
@@ -1241,14 +1235,10 @@ func (r *raft) restore(s pb.Snapshot) bool {
 }
 
 // promotable indicates whether state machine can be promoted to leader,
-// which is true when its own id is in progress list.
+// which is true when its own id is in progress list and suffrage is Voter
 func (r *raft) promotable() bool {
 	_, ok := r.prs[r.id]
-	return ok
-}
-
-func (r *raft) addNode(id uint64) {
-	r.addNodeWithSuffrage(id, pb.Voter)
+	return ok && r.suffrage == pb.Voter
 }
 
 func (r *raft) addNonvoter(id uint64) {
@@ -1257,6 +1247,10 @@ func (r *raft) addNonvoter(id uint64) {
 
 func (r *raft) addVoter(id uint64) {
 	r.addNodeWithSuffrage(id, pb.Staging)
+}
+
+func (r *raft) addNode(id uint64) {
+	r.addNodeWithSuffrage(id, pb.Voter)
 }
 
 func (r *raft) addNodeWithSuffrage(id uint64, suffrage pb.SuffrageState) {
@@ -1268,6 +1262,10 @@ func (r *raft) addNodeWithSuffrage(id uint64, suffrage pb.SuffrageState) {
 			return
 		}
 		// TODO(lishuai): check state change, Nonvoter -> Staging -> Voter
+		if suffrage != pb.Voter {
+			// addNode can only change suffrage from Nonvoter to Voter
+			return
+		}
 		r.prs[id].Suffrage = suffrage
 	} else {
 		r.setProgress(id, 0, r.raftLog.lastIndex()+1, suffrage)

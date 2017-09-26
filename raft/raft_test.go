@@ -2399,9 +2399,9 @@ func TestRestoreWithNonvoter(t *testing.T) {
 	if mustTerm(sm.raftLog.term(s.Metadata.Index)) != s.Metadata.Term {
 		t.Errorf("log.lastTerm = %d, want %d", mustTerm(sm.raftLog.term(s.Metadata.Index)), s.Metadata.Term)
 	}
-	for _, s := range s.Metadata.ConfState.Servers {
-		if sm.prs[s.Node].Suffrage != s.Suffrage {
-			t.Errorf("sm.Node %x suffrage = %s, want %s", s.Node, sm.prs[s.Node], s.Suffrage)
+	for _, server := range s.Metadata.ConfState.Servers {
+		if sm.prs[server.Node].Suffrage != server.Suffrage {
+			t.Errorf("sm.Node %x suffrage = %s, want %s", server.Node, sm.prs[server.Node], server.Suffrage)
 		}
 	}
 
@@ -3439,15 +3439,13 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 			sm := newRaft(cfg)
 			npeers[id] = sm
 		case *raft:
-			v.id = id
-			r := p.(*raft)
 			suffrages := make(map[uint64]pb.SuffrageState, size)
-			for index, pr := range r.prs {
-				suffrages[index] = pr.Suffrage
+			for i, pr := range p.(*raft).prs {
+				suffrages[i] = pr.Suffrage
 			}
+			v.id = id
 			v.prs = make(map[uint64]*Progress)
 			for i := 0; i < size; i++ {
-				// v.prs[peerAddrs[i]] = &Progress{Suffrage: pb.Voter}
 				v.prs[peerAddrs[i]] = &Progress{Suffrage: suffrages[peerAddrs[i]]}
 			}
 			v.reset(v.Term)

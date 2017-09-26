@@ -173,12 +173,12 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 		return &pb.ConfState{Nodes: rn.raft.nodes()}
 	}
 	switch cc.Type {
-	case pb.ConfChangeAddNode:
-		rn.raft.addNode(cc.NodeID)
 	case pb.ConfChangeAddNonvoter:
 		rn.raft.addNonvoter(cc.NodeID)
 	case pb.ConfChangeAddVoter:
 		rn.raft.addVoter(cc.NodeID)
+	case pb.ConfChangeAddNode:
+		rn.raft.addNode(cc.NodeID)
 	case pb.ConfChangeRemoveNode:
 		rn.raft.removeNode(cc.NodeID)
 	case pb.ConfChangeUpdateNode:
